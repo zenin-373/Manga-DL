@@ -122,6 +122,7 @@ async def view_manga_cb(client, callback_query):
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬇ download chapters", callback_data=f"chapters_{source}_{manga_id}_0")],
         [InlineKeyboardButton("⬇⬇ DOWNLOAD ALL", callback_data=f"dl_all_{source}_{manga_id}")],
+        [InlineKeyboardButton("📋 Range (e.g. 1-10)", callback_data=f"dl_range_{source}_{manga_id}")],
         [InlineKeyboardButton("⬅ Close", callback_data="stats_close")],
     ])
     await callback_query.message.edit_text(
@@ -254,9 +255,137 @@ async def dl_all_cb(client, callback_query):
         await asyncio.sleep(2)
     await status.edit_text(f"✅ Done {ok_n}/{len(uniq)} — {manga_title}")
 
+@Client.on_callback_query(filters.regex(r"^dl_range_"))
+async def dl_range_cb(client, callback_query):
+    """Ask user for chapter range like 1-10 or a single number."""
+    from Plugins.helper import user_states, WAITING_CHAPTER_INPUT
+    rest = callback_query.data[len("dl_range_"):]
+    source, manga_id = rest.split("_", 1)
+    user_states[callback_query.from_user.id] = {
+        "state": WAITING_CHAPTER_INPUT,
+        "source": source,
+        "manga_id": manga_id,
+    }
+    await callback_query.answer()
+    await callback_query.message.reply(
+        "📋 <b>Download range</b>\n\n"
+        "Send a chapter number or range, e.g.\n"
+        "• <code>5</code>\n"
+        "• <code>1-10</code>\n"
+        "• <code>100-150</code>\n\n"
+        "Send /cancel to abort.",
+        parse_mode=enums.ParseMode.HTML,
+    )
+
 async def custom_dl_input_handler(client, message, user_id, state_data):
+    """Parse range like 1-10 or single chapter and download those chapters."""
     from Plugins.helper import user_states
+
     text = (message.text or "").strip()
-    source, manga_id = state_data.get("source"), state_data.get("manga_id")
+    if text.lower() in ("/cancel", "cancel"):
+        user_states.pop(user_id, None)
+        await message.reply("Cancelled.")
+        return
+
+    source = state_data.get("source")
+    manga_id = state_data.get("manga_id")
+    if not source or not manga_id:
+        await message.reply("Session expired. Search again.")
+        user_states.pop(user_id, None)
+        return
+
+    def _num(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    n1 = n2 = None
+    if "-" in text:
+        a, b = text.split("-", 1)
+        n1, n2 = _num(a.strip()), _num(b.strip())
+    else:
+        n1 = n2 = _num(text)
+    if n1 is None or n2 is None:
+        await message.reply("Send a number or range like <code>1-10</code>", parse_mode=enums.ParseMode.HTML)
+        return
+    if n1 > n2:
+        n1, n2 = n2, n1
+
     user_states.pop(user_id, None)
-    await message.reply("Use chapter buttons or DOWNLOAD ALL for now.")
+    api_cls = get_api_class(source)
+    if not api_cls:
+        await message.reply(f"❌ Source {source} not available.")
+        return
+
+    bot = getattr(client, "bot_instance", None)
+    if not bot:
+        await message.reply("❌ Bot not ready.")
+        return
+
+    status = await message.reply(
+        f"🔍 Looking up chapters <b>{n1:g}</b>–<b>{n2:g}</b>...",
+        parse_mode=enums.ParseMode.HTML,
+    )
+    matched, manga_title = [], "Unknown"
+    try:
+        async with api_cls(Config) as api:
+            try:
+                info = await api.get_manga_info(manga_id)
+                if info:
+                    manga_title = info.get("title") or manga_title
+            except Exception:
+                pass
+            all_found = await _fetch_all_chapters(api, manga_id, status_msg=status)
+            for ch in all_found:
+                nf = _num(ch.get("chapter") or ch.get("number") or "")
+                if nf is not None and n1 <= nf <= n2:
+                    matched.append(ch)
+    except Exception as e:
+        await status.edit_text(f"❌ Failed: <code>{e}</code>", parse_mode=enums.ParseMode.HTML)
+        return
+
+    seen, uniq = set(), []
+    for ch in matched:
+        if ch["id"] in seen:
+            continue
+        seen.add(ch["id"])
+        uniq.append(ch)
+    uniq.sort(key=lambda ch: _num(ch.get("chapter") or ch.get("number") or "0") or 0)
+
+    if not uniq:
+        await status.edit_text(
+            f"❌ No chapters in range <b>{n1:g}–{n2:g}</b>.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+        return
+
+    await status.edit_text(
+        f"⏳ Downloading <b>{len(uniq)}</b> chapter(s) of <b>{manga_title}</b>...",
+        parse_mode=enums.ParseMode.HTML,
+    )
+    ok_n = 0
+    for ch in uniq:
+        ch_num = ch.get("chapter") or ch.get("number") or "0"
+        chapter = {
+            "id": ch["id"],
+            "manga_id": manga_id,
+            "manga_title": manga_title,
+            "number": ch_num,
+            "chapter": ch_num,
+            "title": ch.get("title") or "",
+            "url": ch["id"],
+            "source": source,
+            "group": "Unknown",
+        }
+        try:
+            if await bot.process_chapter(chapter):
+                ok_n += 1
+        except Exception as e:
+            logger.error(f"range dl {ch_num}: {e}")
+        await asyncio.sleep(2)
+
+    await status.edit_text(
+        f"✅ Range done: {ok_n}/{len(uniq)} — {manga_title}",
+        parse_mode=enums.ParseMode.HTML,
+    )
