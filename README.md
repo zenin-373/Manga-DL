@@ -12,7 +12,7 @@ Telegram bot to search, download, and post manga chapters (MangaDex and other so
 - Live Aeon-style progress status in Telegram
 - MongoDB config (channels, monitoring, admins)
 
-## Quick start (Colab)
+## Quick start
 
 ```bash
 git clone https://github.com/zenin-373/Manga-DL.git
