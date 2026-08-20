@@ -1,10 +1,49 @@
 name: Deploy to Heroku
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      heroku_app_name:
+        description: "Heroku App name"
+        required: true
+        type: string
+      heroku_api_key:
+        description: "Heroku API key"
+        required: true
+        type: string
+      heroku_email:
+        description: "Heroku email address"
+        required: true
+        type: string
+      heroku_team:
+        description: "Heroku Team Name (optional)"
+        required: false
+        type: string
+      bot_token:
+        description: "Telegram bot token"
+        required: true
+        type: string
+      user_id:
+        description: "Owner's telegram ID"
+        required: true
+        type: string
+      api_id:
+        description: "Telegram API ID"
+        required: true
+        type: string
+      api_hash:
+        description: "Telegram API HASH"
+        required: true
+        type: string
+      db_url:
+        description: "MongoDB URL"
+        required: true
+        type: string
+      db_name:
+        description: "MongoDB database name"
+        required: false
+        default: "manga_bot"
+        type: string
 
 jobs:
   deploy:
@@ -13,12 +52,70 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Heroku CLI
+        run: |
+          curl https://cli-assets.heroku.com/install.sh | sh
+
+      - name: Login to Heroku
+        env:
+          HEROKU_API_KEY: ${{ inputs.heroku_api_key }}
+        run: |
+          cat > ~/.netrc << EOF
+          machine api.heroku.com
+            login ${{ inputs.heroku_email }}
+            password ${{ inputs.heroku_api_key }}
+          machine git.heroku.com
+            login ${{ inputs.heroku_email }}
+            password ${{ inputs.heroku_api_key }}
+          EOF
+          chmod 600 ~/.netrc
+
+      - name: Create app if missing
+        env:
+          HEROKU_API_KEY: ${{ inputs.heroku_api_key }}
+        run: |
+          APP="${{ inputs.heroku_app_name }}"
+          TEAM="${{ inputs.heroku_team }}"
+          if heroku apps:info -a "$APP" >/dev/null 2>&1; then
+            echo "App $APP already exists"
+          else
+            if [ -n "$TEAM" ]; then
+              heroku create "$APP" --team "$TEAM"
+            else
+              heroku create "$APP"
+            fi
+          fi
+
+      - name: Set bot config vars on Heroku
+        env:
+          HEROKU_API_KEY: ${{ inputs.heroku_api_key }}
+        run: |
+          heroku config:set \
+            BOT_TOKEN="${{ inputs.bot_token }}" \
+            USER_ID="${{ inputs.user_id }}" \
+            API_ID="${{ inputs.api_id }}" \
+            API_HASH="${{ inputs.api_hash }}" \
+            DB_URL="${{ inputs.db_url }}" \
+            DB_NAME="${{ inputs.db_name }}" \
+            UPLOAD_MODE="telegram" \
+            -a "${{ inputs.heroku_app_name }}"
+
       - name: Deploy to Heroku
         uses: akhileshns/heroku-deploy@v3.13.15
         with:
-          heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
-          heroku_app_name: ${{ secrets.HEROKU_APP_NAME }}
-          heroku_email: ${{ secrets.HEROKU_EMAIL }}
-          # Uses Procfile worker process
+          heroku_api_key: ${{ inputs.heroku_api_key }}
+          heroku_app_name: ${{ inputs.heroku_app_name }}
+          heroku_email: ${{ inputs.heroku_email }}
           usedocker: false
-          justlogin: false
+
+      - name: Scale worker dyno
+        env:
+          HEROKU_API_KEY: ${{ inputs.heroku_api_key }}
+        run: |
+          heroku ps:scale worker=1 -a "${{ inputs.heroku_app_name }}" || true
+          heroku ps:type worker=basic -a "${{ inputs.heroku_app_name }}" || true
+
+      - name: Done
+        run: |
+          echo "Deployed ${{ inputs.heroku_app_name }}"
+          echo "Worker should be running Bot.py"
