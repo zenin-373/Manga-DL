@@ -1,0 +1,49 @@
+{
+  "name": "Manga-DL",
+  "description": "Asa Bot — Telegram manga downloader",
+  "repository": "https://github.com/zenin-373/Manga-DL",
+  "keywords": ["telegram", "manga", "bot", "mangadex"],
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Telegram bot token from @BotFather",
+      "required": true
+    },
+    "API_ID": {
+      "description": "Telegram API ID from my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Telegram API hash from my.telegram.org",
+      "required": true
+    },
+    "USER_ID": {
+      "description": "Your Telegram user ID (admin)",
+      "required": true
+    },
+    "DB_URL": {
+      "description": "MongoDB connection URI",
+      "required": true
+    },
+    "DB_NAME": {
+      "description": "MongoDB database name",
+      "value": "manga_bot",
+      "required": false
+    },
+    "UPLOAD_MODE": {
+      "description": "telegram | drive | both",
+      "value": "telegram",
+      "required": false
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
