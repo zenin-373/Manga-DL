@@ -3,7 +3,7 @@ import logging
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import Config
-from Plugins.helper import get_random_pic, get_styled_text
+from Plugins.helper import get_random_pic, get_styled_text, user_states
 from Plugins.Settings.main_settings import settings_main_menu
 
 logger = logging.getLogger(__name__)
@@ -36,11 +36,22 @@ async def help_cmd(client, message):
         "<blockquote>Powered By @Asa_Mikata373</blockquote>\n\n"
         "<b>How to use</b>\n"
         "• /search one piece — search manga\n"
-        "• Pick source → manga → download chapters or DOWNLOAD ALL\n"
-        "• /settings — dump & upload channels\n\n"
+        "• Pick source → manga → chapters / range / DOWNLOAD ALL\n"
+        "• /settings — dump & upload channels\n"
+        "• /cancel — cancel current input (range, settings, etc.)\n\n"
         "Need help? @Asa_Mikata373"
     )
     await message.reply(text, parse_mode=enums.ParseMode.HTML)
+
+@Client.on_message(filters.command("cancel") & filters.private)
+async def cancel_cmd(client, message):
+    """Clear any waiting state (chapter range, settings input, etc.)."""
+    uid = message.from_user.id
+    if uid in user_states:
+        user_states.pop(uid, None)
+        await message.reply("✅ Cancelled. You can start again with /search or /settings.")
+    else:
+        await message.reply("Nothing to cancel.")
 
 @Client.on_callback_query(filters.regex("^help_cb$"))
 async def help_cb(client, cq):
