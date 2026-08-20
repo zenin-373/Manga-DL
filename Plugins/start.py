@@ -1,0 +1,56 @@
+# Manga-DL — Asa Bot
+import logging
+from pyrogram import Client, filters, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from config import Config
+from Plugins.helper import get_random_pic, get_styled_text
+from Plugins.Settings.main_settings import settings_main_menu
+
+logger = logging.getLogger(__name__)
+
+@Client.on_message(filters.command("start") & filters.private)
+async def start_cmd(client, message):
+    text = (
+        "<blockquote>Powered By @Asa_Mikata373</blockquote>\n\n"
+        "<b>Manga-DL — Asa Bot</b>\n\n"
+        "Search and download manga chapters.\n"
+        "Use /search &lt;name&gt; or /help."
+    )
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Help", callback_data="help_cb")],
+        [InlineKeyboardButton("📢 Channel", url="https://t.me/Asa_Mikata373"),
+         InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/Asa_Mikata373")],
+    ])
+    try:
+        await message.reply_photo(get_random_pic(), caption=text, reply_markup=buttons, parse_mode=enums.ParseMode.HTML)
+    except Exception:
+        await message.reply(text, reply_markup=buttons, parse_mode=enums.ParseMode.HTML)
+
+@Client.on_message(filters.command(["settings", "setting"]) & filters.private)
+async def settings_cmd(client, message):
+    await settings_main_menu(client, message, edit=False)
+
+@Client.on_message(filters.command("help") & filters.private)
+async def help_cmd(client, message):
+    text = (
+        "<blockquote>Powered By @Asa_Mikata373</blockquote>\n\n"
+        "<b>How to use</b>\n"
+        "• /search one piece — search manga\n"
+        "• Pick source → manga → download chapters or DOWNLOAD ALL\n"
+        "• /settings — dump & upload channels\n\n"
+        "Need help? @Asa_Mikata373"
+    )
+    await message.reply(text, parse_mode=enums.ParseMode.HTML)
+
+@Client.on_callback_query(filters.regex("^help_cb$"))
+async def help_cb(client, cq):
+    await help_cmd(client, cq.message)
+    await cq.answer()
+
+@Client.on_callback_query(filters.regex("^stats_close$"))
+async def close_cb(client, cq):
+    try:
+        await cq.message.delete()
+    except Exception:
+        pass
+    await cq.answer()
