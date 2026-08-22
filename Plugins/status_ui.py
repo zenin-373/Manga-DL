@@ -1,5 +1,5 @@
 # Manga-DL — Asa Bot
-"""Aeon-style live status messages for manga download/upload."""
+"""Live status messages for manga download/upload."""
 import time
 import logging
 from pyrogram import enums
@@ -48,15 +48,17 @@ def get_progress_bar_string(pct):
 
 
 def format_status(name, status, percent=0, processed=None, total=None, speed=None, eta=None, extra=None):
+    """Old-style status — no Powered By line."""
     lines = [
-        "<blockquote>Powered By @Asa_Mikata373</blockquote>",
-        "",
         f"<b>{status}:</b> <code>{_esc(name)}</code>",
         f"{get_progress_bar_string(percent)} {percent:.1f}%",
     ]
     if processed is not None or total is not None:
         if isinstance(processed, (int, float)) and isinstance(total, (int, float)) and total > 50:
-            lines.append(f"<b>Processed:</b> {get_readable_file_size(processed)} of {get_readable_file_size(total)}")
+            lines.append(
+                f"<b>Processed:</b> {get_readable_file_size(processed)}"
+                f" of {get_readable_file_size(total)}"
+            )
         else:
             lines.append(f"<b>Count:</b> {processed or 0}/{total or '?'}")
     if speed:
@@ -96,8 +98,10 @@ class TaskStatus:
         self._t0 = time.time()
         try:
             self.message = await self.app.send_message(
-                self.chat_id, format_status(name, status, 0, 0, 0),
-                parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True,
+                self.chat_id,
+                format_status(name, status, 0, 0, 0),
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
             )
         except Exception as e:
             logger.error(f"TaskStatus.start: {e}")
@@ -114,6 +118,7 @@ class TaskStatus:
             self.percent = percent
         elif self.total:
             self.percent = min(100.0, 100.0 * float(self.processed) / float(self.total))
+
         now = time.time()
         dt = now - self._last_t
         if dt > 0.5 and current is not None:
@@ -127,6 +132,7 @@ class TaskStatus:
             self.eta = get_readable_time(left / rate) if rate > 0 else "-"
             self._last_processed = current or 0
             self._last_t = now
+
         if not force and (now - self._last_edit) < self.min_interval:
             return
         self._last_edit = now
@@ -134,8 +140,12 @@ class TaskStatus:
             return
         try:
             await self.message.edit_text(
-                format_status(self.name, self.status, self.percent, self.processed, self.total, self.speed, self.eta, extra),
-                parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True,
+                format_status(
+                    self.name, self.status, self.percent,
+                    self.processed, self.total, self.speed, self.eta, extra,
+                ),
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
             )
         except Exception as e:
             if "MESSAGE_NOT_MODIFIED" not in str(e):
@@ -153,8 +163,12 @@ class TaskStatus:
             return
         try:
             await self.message.edit_text(
-                format_status(self.name, status, self.percent, self.processed, self.total, None, None, extra),
-                parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True,
+                format_status(
+                    self.name, status, self.percent,
+                    self.processed, self.total, None, None, extra,
+                ),
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
             )
         except Exception as e:
             logger.debug(f"TaskStatus.finish: {e}")
