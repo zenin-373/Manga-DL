@@ -190,7 +190,7 @@ async def dl_ask_cb(client, callback_query):
         await callback_query.message.reply("Bot not ready")
         return
     api_cls = get_api_class(source)
-    manga_title, ch_num, ch_title = "Unknown", "0", ""
+    manga_title = "Unknown"
     try:
         async with api_cls(Config) as api:
             info = await api.get_manga_info(manga_id)
@@ -200,12 +200,12 @@ async def dl_ask_cb(client, callback_query):
         pass
     chapter = {
         "id": chapter_id, "manga_id": manga_id, "manga_title": manga_title,
-        "number": ch_num, "chapter": ch_num, "title": ch_title,
+        "number": "0", "chapter": "0", "title": "",
         "url": chapter_id, "source": source, "group": "Unknown",
     }
-    status = await callback_query.message.reply(f"⬇️ Ch {ch_num} — {manga_title}")
+    status = await callback_query.message.reply(f"⬇️ {manga_title}")
     ok = await bot.process_chapter(chapter)
-    await status.edit_text("✅ Done" if ok else "⚠️ Issues")
+    await status.edit_text("✅ Done" if ok else "⚠️ Issues / cancelled")
 
 @Client.on_callback_query(filters.regex(r"^dl_all_"))
 async def dl_all_cb(client, callback_query):
@@ -233,9 +233,18 @@ async def dl_all_cb(client, callback_query):
     if not uniq:
         await status.edit_text("No chapters")
         return
-    await status.edit_text(f"⏳ Downloading <b>{len(uniq)}</b> — {manga_title}", parse_mode=enums.ParseMode.HTML)
+    await status.edit_text(f"⏳ Downloading <b>{len(uniq)}</b> — {manga_title}\n/cancel to stop", parse_mode=enums.ParseMode.HTML)
     ok_n = 0
+    if bot:
+        bot.clear_cancel()
     for i, ch in enumerate(uniq, 1):
+        if bot and bot.is_cancelled():
+            try:
+                await status.edit_text(f"🛑 Cancelled at {i-1}/{len(uniq)} (OK:{ok_n})")
+            except Exception:
+                pass
+            bot.clear_cancel()
+            return
         ch_num = ch.get("chapter") or ch.get("number") or "0"
         chapter = {
             "id": ch["id"], "manga_id": manga_id, "manga_title": manga_title,
@@ -249,15 +258,16 @@ async def dl_all_cb(client, callback_query):
             logger.error(f"dl_all: {e}")
         if i % 3 == 0:
             try:
-                await status.edit_text(f"⏳ {i}/{len(uniq)} OK:{ok_n}")
+                await status.edit_text(f"⏳ {i}/{len(uniq)} OK:{ok_n}\n/cancel to stop")
             except Exception:
                 pass
         await asyncio.sleep(2)
+    if bot:
+        bot.clear_cancel()
     await status.edit_text(f"✅ Done {ok_n}/{len(uniq)} — {manga_title}")
 
 @Client.on_callback_query(filters.regex(r"^dl_range_"))
 async def dl_range_cb(client, callback_query):
-    """Ask user for chapter range like 1-10 or a single number."""
     from Plugins.helper import user_states, WAITING_CHAPTER_INPUT
     rest = callback_query.data[len("dl_range_"):]
     source, manga_id = rest.split("_", 1)
@@ -271,22 +281,21 @@ async def dl_range_cb(client, callback_query):
         "📋 <b>Download range</b>\n\n"
         "Send a chapter number or range, e.g.\n"
         "• <code>5</code>\n"
-        "• <code>1-10</code>\n"
-        "• <code>100-150</code>\n\n"
-        "Send /cancel to abort.",
+        "• <code>1-10</code>\n\n"
+        "/cancel to abort.",
         parse_mode=enums.ParseMode.HTML,
     )
 
 async def custom_dl_input_handler(client, message, user_id, state_data):
-    """Parse range like 1-10 or single chapter and download those chapters."""
     from Plugins.helper import user_states
-
     text = (message.text or "").strip()
     if text.lower() in ("/cancel", "cancel"):
         user_states.pop(user_id, None)
+        bot = getattr(client, "bot_instance", None)
+        if bot:
+            bot.request_cancel()
         await message.reply("Cancelled.")
         return
-
     source = state_data.get("source")
     manga_id = state_data.get("manga_id")
     if not source or not manga_id:
@@ -314,13 +323,9 @@ async def custom_dl_input_handler(client, message, user_id, state_data):
 
     user_states.pop(user_id, None)
     api_cls = get_api_class(source)
-    if not api_cls:
-        await message.reply(f"❌ Source {source} not available.")
-        return
-
     bot = getattr(client, "bot_instance", None)
-    if not bot:
-        await message.reply("❌ Bot not ready.")
+    if not api_cls or not bot:
+        await message.reply("❌ Not ready.")
         return
 
     status = await message.reply(
@@ -354,29 +359,28 @@ async def custom_dl_input_handler(client, message, user_id, state_data):
     uniq.sort(key=lambda ch: _num(ch.get("chapter") or ch.get("number") or "0") or 0)
 
     if not uniq:
-        await status.edit_text(
-            f"❌ No chapters in range <b>{n1:g}–{n2:g}</b>.",
-            parse_mode=enums.ParseMode.HTML,
-        )
+        await status.edit_text(f"❌ No chapters in range <b>{n1:g}–{n2:g}</b>.", parse_mode=enums.ParseMode.HTML)
         return
 
     await status.edit_text(
-        f"⏳ Downloading <b>{len(uniq)}</b> chapter(s) of <b>{manga_title}</b>...",
+        f"⏳ Downloading <b>{len(uniq)}</b> of <b>{manga_title}</b>...\n/cancel to stop",
         parse_mode=enums.ParseMode.HTML,
     )
     ok_n = 0
+    bot.clear_cancel()
     for ch in uniq:
+        if bot.is_cancelled():
+            await status.edit_text(
+                f"🛑 Cancelled — {ok_n}/{len(uniq)} done — {manga_title}",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            bot.clear_cancel()
+            return
         ch_num = ch.get("chapter") or ch.get("number") or "0"
         chapter = {
-            "id": ch["id"],
-            "manga_id": manga_id,
-            "manga_title": manga_title,
-            "number": ch_num,
-            "chapter": ch_num,
-            "title": ch.get("title") or "",
-            "url": ch["id"],
-            "source": source,
-            "group": "Unknown",
+            "id": ch["id"], "manga_id": manga_id, "manga_title": manga_title,
+            "number": ch_num, "chapter": ch_num, "title": ch.get("title") or "",
+            "url": ch["id"], "source": source, "group": "Unknown",
         }
         try:
             if await bot.process_chapter(chapter):
@@ -385,6 +389,7 @@ async def custom_dl_input_handler(client, message, user_id, state_data):
             logger.error(f"range dl {ch_num}: {e}")
         await asyncio.sleep(2)
 
+    bot.clear_cancel()
     await status.edit_text(
         f"✅ Range done: {ok_n}/{len(uniq)} — {manga_title}",
         parse_mode=enums.ParseMode.HTML,
