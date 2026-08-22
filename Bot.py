@@ -6,6 +6,7 @@ import asyncio
 import shutil
 import logging
 import gc
+import signal
 from pathlib import Path
 
 if sys.platform.startswith("win"):
@@ -26,13 +27,8 @@ from Plugins.uploading import PyrogramHandler
 from Plugins.gdrive import DriveMountHandler
 from Database.database import *
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
-
 
 class MangaDexBot:
     def __init__(self, Config):
@@ -50,39 +46,36 @@ class MangaDexBot:
         self.dump_channel_id = None
         self.filename_format = Config.DEFAULT_FILENAME_FORMAT
         self.has_custom_thumbnail = False
-        self.telegram = PyrogramHandler(
-            Config.API_ID,
-            Config.API_HASH,
-            Config.BOT_TOKEN,
-            self.upload_channel_id,
-            Config.USER_ID,
-            plugins=self.plugins,
-            bot_instance=self,
-        )
+        self.telegram = PyrogramHandler(Config.API_ID, Config.API_HASH, Config.BOT_TOKEN, self.upload_channel_id, Config.USER_ID, plugins=self.plugins, bot_instance=self)
         self.processing = False
         self.drive = None
         self.upload_mode = getattr(Config, "UPLOAD_MODE", "both")
         self.posted_manga_info = set()
+        self.cancel_requested = False
+
+    def request_cancel(self):
+        self.cancel_requested = True
+        logger.info("Cancel requested")
+
+    def clear_cancel(self):
+        self.cancel_requested = False
+
+    def is_cancelled(self):
+        return bool(self.cancel_requested)
 
     async def resolve_dynamic_config(self):
         if not self.Config.USE_DATABASE:
             return
         try:
             db_channel = await self.db_master.get_default_channel()
-            if db_channel not in (None, "", "None"):
-                self.upload_channel_id = int(db_channel)
-            else:
-                self.upload_channel_id = None
+            self.upload_channel_id = int(db_channel) if db_channel not in (None, "", "None") else None
             if self.telegram:
                 self.telegram.channel_id = self.upload_channel_id
         except Exception as e:
             logger.error(f"Channel load error: {e}")
         try:
             dump_channel = await self.db_master.get_config("dump_channel")
-            if dump_channel not in (None, "", "None"):
-                self.dump_channel_id = int(dump_channel)
-            else:
-                self.dump_channel_id = self.upload_channel_id
+            self.dump_channel_id = int(dump_channel) if dump_channel not in (None, "", "None") else self.upload_channel_id
         except Exception as e:
             logger.error(f"Dump Channel load error: {e}")
         try:
@@ -92,29 +85,12 @@ class MangaDexBot:
         except Exception:
             self.filename_format = self.Config.DEFAULT_FILENAME_FORMAT
         try:
-            self.has_custom_thumbnail = bool(await self.db_master.get_thumbnail())
-        except Exception:
-            self.has_custom_thumbnail = False
-        try:
-            drive_path = (
-                await self.db_master.get_config("drive_mount_path")
-                or getattr(self.Config, "DRIVE_MOUNT_PATH", "")
-                or ""
-            )
+            drive_path = await self.db_master.get_config("drive_mount_path") or getattr(self.Config, "DRIVE_MOUNT_PATH", "") or ""
             self.drive = DriveMountHandler(drive_path) if drive_path else None
             if self.drive and not self.drive.is_available():
                 self.drive = None
         except Exception:
             self.drive = None
-        try:
-            mode = await self.db_master.get_config("upload_mode")
-            self.upload_mode = (
-                mode
-                if mode in ("telegram", "drive", "both")
-                else getattr(self.Config, "UPLOAD_MODE", "both")
-            )
-        except Exception:
-            self.upload_mode = "both"
 
     async def load_state(self):
         if self.state_file.exists():
@@ -160,17 +136,11 @@ class MangaDexBot:
     async def mark_chapter_uploaded(self, chapter_id, manga_id, manga_title, chapter_num, file_id=None):
         if self.Config.USE_DATABASE:
             try:
-                await self.db_master.manga_store_data(
-                    chapter_id, manga_id, manga_title, chapter_num, file_id
-                )
+                await self.db_master.manga_store_data(chapter_id, manga_id, manga_title, chapter_num, file_id)
             except Exception:
                 pass
         if chapter_id not in self.state["uploaded_chapters"]:
             self.state["uploaded_chapters"].append(chapter_id)
-
-    def cleanup_old_records(self):
-        if len(self.state["uploaded_chapters"]) > 500:
-            self.state["uploaded_chapters"] = self.state["uploaded_chapters"][-500:]
 
     async def cleanup_downloads(self):
         try:
@@ -183,7 +153,7 @@ class MangaDexBot:
 
     def _safe_cleanup(self, chapter_dir, file_path, thumb_path):
         try:
-            if chapter_dir and chapter_dir.exists():
+            if chapter_dir and Path(chapter_dir).exists():
                 shutil.rmtree(chapter_dir, ignore_errors=True)
             if file_path and Path(file_path).exists():
                 Path(file_path).unlink(missing_ok=True)
@@ -194,50 +164,31 @@ class MangaDexBot:
 
     def get_api_instance(self, source):
         s = str(source).lower()
-        if s == "webcentral":
-            return WebCentralAPI(self.Config)
-        if s == "mangaforest":
-            return MangaForestAPI(self.Config)
-        if s == "mangakakalot":
-            return MangakakalotAPI(self.Config)
-        if s == "allmanga":
-            return AllMangaAPI(self.Config)
+        if s == "webcentral": return WebCentralAPI(self.Config)
+        if s == "mangaforest": return MangaForestAPI(self.Config)
+        if s == "mangakakalot": return MangakakalotAPI(self.Config)
+        if s == "allmanga": return AllMangaAPI(self.Config)
         return MangaDexAPI(self.Config)
 
-    def _build_rich_caption(
-        self, manga_title, chapter_num, chapter_title="", group="Unknown", manga_info=None, drive_path=None
-    ):
+    def _build_rich_caption(self, manga_title, chapter_num, chapter_title="", group="Unknown", manga_info=None, drive_path=None):
         import html
-
         info = manga_info or {}
-        lines = [
-            f"<blockquote><b>📖 {html.escape(str(manga_title))}</b></blockquote>",
-            "",
-            f"<b>Chapter {html.escape(str(chapter_num))}</b>",
-        ]
+        lines = [f"<blockquote><b>📖 {html.escape(str(manga_title))}</b></blockquote>", "", f"<b>Chapter {html.escape(str(chapter_num))}</b>"]
         if chapter_title:
             lines.append(f"<blockquote>{html.escape(chapter_title)}</blockquote>")
         meta = []
-        if info.get("year"):
-            meta.append(f"📅 Year: <code>{info['year']}</code>")
-        if info.get("status"):
-            meta.append(f"📊 Status: <b>{html.escape(str(info['status']))}</b>")
-        if info.get("last_volume"):
-            meta.append(f"📚 Total Volumes: <code>{html.escape(str(info['last_volume']))}</code>")
-        if info.get("last_chapter"):
-            meta.append(f"📑 Total Chapters: <code>{html.escape(str(info['last_chapter']))}</code>")
+        if info.get("year"): meta.append(f"📅 Year: <code>{info['year']}</code>")
+        if info.get("status"): meta.append(f"📊 Status: <b>{html.escape(str(info['status']))}</b>")
+        if info.get("last_volume"): meta.append(f"📚 Total Volumes: <code>{html.escape(str(info['last_volume']))}</code>")
+        if info.get("last_chapter"): meta.append(f"📑 Total Chapters: <code>{html.escape(str(info['last_chapter']))}</code>")
         authors = info.get("authors") or []
-        if authors:
-            meta.append(f"✍️ Author: {html.escape(', '.join(authors[:3]))}")
+        if authors: meta.append(f"✍️ Author: {html.escape(', '.join(authors[:3]))}")
         tags = info.get("tags") or []
-        if tags:
-            meta.append(f"🏷️ Tags: {html.escape(', '.join(tags[:6]))}")
+        if tags: meta.append(f"🏷️ Tags: {html.escape(', '.join(tags[:6]))}")
         meta.append(f"🌐 Group: {html.escape(str(group))}")
         meta.append("🗣 Language: English")
-        if meta:
-            lines += ["", "<blockquote>" + "\n".join(meta) + "</blockquote>"]
-        if drive_path:
-            lines += ["", "📁 <i>Also saved to Drive</i>"]
+        if meta: lines += ["", "<blockquote>" + "\n".join(meta) + "</blockquote>"]
+        if drive_path: lines += ["", "📁 <i>Also saved to Drive</i>"]
         return "\n".join(lines)
 
     async def process_chapter(self, chapter):
@@ -250,32 +201,22 @@ class MangaDexBot:
             chapter_num = chapter.get("number") or chapter.get("chapter") or "0"
             chapter_title = chapter.get("title") or ""
             logger.info(f"Processing: {manga_title} - Ch {chapter_num}")
+            if self.is_cancelled():
+                logger.info("Skipped (cancelled)")
+                return False
 
             async def progress_hook(current, total, action="Processing"):
                 try:
-                    await self.db_master.set_upload_state(
-                        manga_id,
-                        f"[{action}] {manga_title} - Ch {chapter_num}",
-                        1 if action == "Upload" else 0,
-                        current,
-                        total,
-                    )
+                    await self.db_master.set_upload_state(manga_id, f"[{action}] {manga_title} - Ch {chapter_num}", 1 if action == "Upload" else 0, current, total)
                 except Exception:
                     pass
 
             if await self.is_chapter_uploaded(chapter_id):
-                logger.info("Already uploaded")
                 return False
 
-            raw_src = (
-                chapter.get("source")
-                or await self.db_master.get_config("manga_source", "mangadex")
-                or "mangadex"
-            )
+            raw_src = chapter.get("source") or await self.db_master.get_config("manga_source", "mangadex") or "mangadex"
             import re as _re
-
-            _cid = str(chapter.get("id") or "")
-            if _re.fullmatch(r"[0-9a-fA-F-]{36}", _cid):
+            if _re.fullmatch(r"[0-9a-fA-F-]{36}", str(chapter.get("id") or "")):
                 raw_src = "mangadex"
             source = str(raw_src).lower()
             logger.info(f"Using source: {source}")
@@ -312,52 +253,31 @@ class MangaDexBot:
             async with Downloader(self.Config) as downloader:
                 async def dl_progress(c, t):
                     await progress_hook(c, t, "Download")
-
-                if not await downloader.download_images(
-                    images, chapter_dir, dl_progress, headers=source_headers
-                ):
+                if self.is_cancelled():
+                    return False
+                if not await downloader.download_images(images, chapter_dir, dl_progress, headers=source_headers, should_cancel=self.is_cancelled):
                     return False
 
                 cover_url = manga_info.get("cover_url")
                 cover_path = chapter_dir.parent / "cover.jpg" if cover_url else None
                 if cover_url:
-                    await downloader.download_cover(
-                        cover_url, cover_path, headers=source_headers
-                    )
+                    await downloader.download_cover(cover_url, cover_path, headers=source_headers)
 
                 file_type = await self.db_master.get_config("file_type", "pdf")
                 quality = await self.db_master.get_config("image_quality")
                 pdf_password = await self.db_master.get_config("pdf_password")
                 watermark = await self.db_master.get_watermark()
-                base_file = await asyncio.to_thread(
-                    downloader.create_chapter_file,
-                    chapter_dir,
-                    manga_title,
-                    chapter_num,
-                    chapter_title,
-                    file_type,
-                    None,
-                    None,
-                    quality,
-                    watermark,
-                    password=pdf_password,
-                )
+                base_file = await asyncio.to_thread(downloader.create_chapter_file, chapter_dir, manga_title, chapter_num, chapter_title, file_type, None, None, quality, watermark, password=pdf_password)
                 if not base_file:
                     return False
 
                 safe_manga = "".join(c for c in manga_title if c.isalnum() or c in " -_[]")
                 safe_chap = str(chapter_num).replace(".", "-")
                 try:
-                    final_name = self.filename_format.format(
-                        manga_name=safe_manga,
-                        chapter=safe_chap,
-                        chapter_title=chapter_title.strip(),
-                    )
+                    final_name = self.filename_format.format(manga_name=safe_manga, chapter=safe_chap, chapter_title=chapter_title.strip())
                 except KeyError:
                     final_name = f"{safe_manga} [Ch-{safe_chap}]"
-                final_name = "".join(
-                    c for c in final_name if c.isalnum() or c in " -_[]()"
-                )[:150].strip()
+                final_name = "".join(c for c in final_name if c.isalnum() or c in " -_[]()")[:150].strip()
                 ext = ".cbz" if str(file_type).lower() == "cbz" else ".pdf"
                 if not final_name.lower().endswith(ext):
                     final_name += ext
@@ -384,95 +304,48 @@ class MangaDexBot:
                     return False
 
                 original_cid = self.telegram.channel_id
-
                 async def ul_progress(c, t):
                     await progress_hook(c, t, "Upload")
-
-                if chapter_title and str(chapter_title).strip():
-                    storage_caption = (
-                        f"{manga_title}\nChapter {chapter_num}\n"
-                        f"<blockquote>{str(chapter_title).strip()}</blockquote>"
-                    )
-                else:
-                    storage_caption = f"{manga_title}\nChapter {chapter_num}"
+                storage_caption = f"{manga_title}\nChapter {chapter_num}" + (f"\n<blockquote>{str(chapter_title).strip()}</blockquote>" if chapter_title and str(chapter_title).strip() else "")
 
                 self.telegram.channel_id = target_dump
-                file_id = await self.telegram.upload_chapter(
-                    file_path, storage_caption, thumb_path, ul_progress
-                )
+                file_id = await self.telegram.upload_chapter(file_path, storage_caption, thumb_path, ul_progress)
                 if not file_id:
                     self.telegram.channel_id = original_cid
                     return False
 
                 if self.upload_channel_id:
                     if manga_id not in self.posted_manga_info:
-                        rich = self._build_rich_caption(
-                            manga_title,
-                            chapter_num,
-                            chapter_title,
-                            chapter.get("group", "Unknown"),
-                            manga_info,
-                            None,
-                        )
+                        rich = self._build_rich_caption(manga_title, chapter_num, chapter_title, chapter.get("group", "Unknown"), manga_info, None)
                         self.posted_manga_info.add(manga_id)
                         try:
                             if thumb_path and Path(thumb_path).exists():
-                                await self.telegram.app.send_photo(
-                                    chat_id=self.upload_channel_id,
-                                    photo=str(thumb_path),
-                                    caption=rich,
-                                    parse_mode=enums.ParseMode.HTML,
-                                )
+                                await self.telegram.app.send_photo(chat_id=self.upload_channel_id, photo=str(thumb_path), caption=rich, parse_mode=enums.ParseMode.HTML)
                             else:
-                                await self.telegram.app.send_message(
-                                    chat_id=self.upload_channel_id,
-                                    text=rich,
-                                    parse_mode=enums.ParseMode.HTML,
-                                    disable_web_page_preview=True,
-                                )
+                                await self.telegram.app.send_message(chat_id=self.upload_channel_id, text=rich, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
                         except Exception as e:
                             logger.warning(f"info post: {e}")
                     if int(self.upload_channel_id) != int(target_dump):
                         self.telegram.channel_id = self.upload_channel_id
                         try:
-                            await self.telegram.upload_chapter(
-                                file_path, storage_caption, thumb_path, None
-                            )
+                            await self.telegram.upload_chapter(file_path, storage_caption, thumb_path, None)
                         except Exception as e:
                             logger.warning(f"upload ch: {e}")
 
                 self.telegram.channel_id = original_cid
                 try:
-                    bot_username = (
-                        self.telegram.app.me.username if self.telegram.app.me else "Bot"
-                    )
+                    bot_username = self.telegram.app.me.username if self.telegram.app.me else "Bot"
                 except Exception:
                     bot_username = "Bot"
                 deep_link = f"https://t.me/{bot_username}?start=dl_{chapter_id}"
                 import html as _html
-
-                dump_info = (
-                    f"<b>{_html.escape(str(manga_title))}</b>\n"
-                    f"Chapter <code>{_html.escape(str(chapter_num))}</code>"
-                )
+                dump_info = f"<b>{_html.escape(str(manga_title))}</b>\nChapter <code>{_html.escape(str(chapter_num))}</code>"
                 if chapter_title and str(chapter_title).strip():
-                    dump_info += (
-                        f"\n<blockquote>{_html.escape(str(chapter_title).strip())}</blockquote>"
-                    )
-                await self.telegram.send_post(
-                    chat_id=target_dump,
-                    caption=dump_info,
-                    photo_path=None,
-                    button_url=deep_link,
-                    channel_link="https://t.me/Asa_Mikata373",
-                )
-                await self.mark_chapter_uploaded(
-                    chapter_id, manga_id, manga_title, chapter_num, file_id
-                )
+                    dump_info += f"\n<blockquote>{_html.escape(str(chapter_title).strip())}</blockquote>"
+                await self.telegram.send_post(chat_id=target_dump, caption=dump_info, photo_path=None, button_url=deep_link, channel_link="https://t.me/Asa_Mikata373")
+                await self.mark_chapter_uploaded(chapter_id, manga_id, manga_title, chapter_num, file_id)
                 await self.save_state()
-                await self.telegram.send_notification(
-                    f"Posted: {manga_title} - Ch {chapter_num}"
-                )
+                await self.telegram.send_notification(f"Posted: {manga_title} - Ch {chapter_num}")
                 return True
         except Exception as e:
             logger.error(f"Processing error: {e}")
@@ -480,9 +353,7 @@ class MangaDexBot:
         finally:
             await self.db_master.clear_upload_state()
             try:
-                await asyncio.to_thread(
-                    self._safe_cleanup, chapter_dir, file_path, thumb_path
-                )
+                await asyncio.to_thread(self._safe_cleanup, chapter_dir, file_path, thumb_path)
             except Exception:
                 pass
         gc.collect()
@@ -502,10 +373,11 @@ class MangaDexBot:
                 chapters = await api_instance.get_latest_chapters()
             if not chapters:
                 return
-            new_chapters = [
-                ch for ch in chapters if not await self.is_chapter_uploaded(ch["id"])
-            ]
+            new_chapters = [ch for ch in chapters if not await self.is_chapter_uploaded(ch["id"])]
             for chapter in new_chapters[: self.Config.MAX_CHAPTERS_PER_CHECK]:
+                if self.is_cancelled():
+                    self.clear_cancel()
+                    break
                 if not await self.db_master.get_monitoring_status():
                     break
                 await self.process_chapter(chapter)
@@ -533,6 +405,15 @@ class MangaDexBot:
         self.manga_cache = await self.load_cache()
         await self.telegram.initialize()
         try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, self.request_cancel)
+                except NotImplementedError:
+                    pass
+        except Exception:
+            pass
+        try:
             await self.db_master.refresh_admins()
         except Exception as e:
             logger.error(f"admins: {e}")
@@ -548,19 +429,24 @@ class MangaDexBot:
         try:
             await idle()
         except KeyboardInterrupt:
-            pass
+            self.request_cancel()
         finally:
+            self.request_cancel()
             monitor_task.cancel()
-            await self.telegram.stop()
+            try:
+                await self.telegram.stop()
+            except Exception:
+                pass
             await self.save_state()
             await self.save_cache()
             await self.cleanup_downloads()
-
 
 async def main():
     bot = MangaDexBot(Config)
     await bot.run()
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Stopped by user")
