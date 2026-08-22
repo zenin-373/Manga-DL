@@ -4,7 +4,6 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import Config
 from Plugins.helper import get_random_pic, get_styled_text, user_states
-from Plugins.Settings.main_settings import settings_main_menu
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +17,7 @@ async def start_cmd(client, message):
     )
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Help", callback_data="help_cb")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="settings_menu")],
         [InlineKeyboardButton("📢 Channel", url="https://t.me/Asa_Mikata373"),
          InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/Asa_Mikata373")],
     ])
@@ -28,7 +28,12 @@ async def start_cmd(client, message):
 
 @Client.on_message(filters.command(["settings", "setting"]) & filters.private)
 async def settings_cmd(client, message):
-    await settings_main_menu(client, message, edit=False)
+    try:
+        from Plugins.Settings.main_settings import settings_main_menu
+        await settings_main_menu(client, message, edit=False)
+    except Exception as e:
+        logger.error(f"settings_cmd: {e}")
+        await message.reply(f"❌ Settings failed: <code>{e}</code>", parse_mode=enums.ParseMode.HTML)
 
 @Client.on_message(filters.command("help") & filters.private)
 async def help_cmd(client, message):
@@ -38,14 +43,13 @@ async def help_cmd(client, message):
         "• /search one piece — search manga\n"
         "• Pick source → manga → chapters / range / DOWNLOAD ALL\n"
         "• /settings — dump & upload channels\n"
-        "• /cancel — cancel current input (range, settings, etc.)\n\n"
+        "• /cancel — cancel current input\n\n"
         "Need help? @Asa_Mikata373"
     )
     await message.reply(text, parse_mode=enums.ParseMode.HTML)
 
 @Client.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client, message):
-    """Clear any waiting state (chapter range, settings input, etc.)."""
     uid = message.from_user.id
     if uid in user_states:
         user_states.pop(uid, None)
