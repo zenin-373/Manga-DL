@@ -27,7 +27,7 @@ class Downloader:
         if self.session:
             await self.session.close()
 
-    async def download_images(self, urls, chapter_dir, progress=None, headers=None):
+    async def download_images(self, urls, chapter_dir, progress=None, headers=None, should_cancel=None):
         chapter_dir = Path(chapter_dir)
         chapter_dir.mkdir(parents=True, exist_ok=True)
         total = len(urls)
@@ -41,6 +41,9 @@ class Downloader:
 
         ok = 0
         for i, url in enumerate(urls):
+            if should_cancel and should_cancel():
+                logger.info("download_images cancelled")
+                break
             try:
                 async with self.session.get(url, headers=hdrs) as resp:
                     if resp.status != 200:
@@ -51,7 +54,6 @@ class Downloader:
                         continue
                     if len(data) > getattr(self.Config, "MAX_IMAGE_SIZE", 10 * 1024 * 1024):
                         continue
-                    # detect extension
                     ext = ".jpg"
                     ctype = (resp.headers.get("Content-Type") or "").lower()
                     if "png" in ctype:
@@ -86,25 +88,13 @@ class Downloader:
         return False
 
     def create_chapter_file(
-        self,
-        chapter_dir,
-        manga_title,
-        chapter_num,
-        chapter_title,
-        file_type="pdf",
-        intro=None,
-        outro=None,
-        quality=None,
-        watermark=None,
-        password=None,
+        self, chapter_dir, manga_title, chapter_num, chapter_title,
+        file_type="pdf", intro=None, outro=None, quality=None,
+        watermark=None, password=None,
     ):
         chapter_dir = Path(chapter_dir)
         images = sorted(
-            [
-                p
-                for p in chapter_dir.iterdir()
-                if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-            ]
+            [p for p in chapter_dir.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
         )
         if not images:
             return None

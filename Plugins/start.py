@@ -43,19 +43,27 @@ async def help_cmd(client, message):
         "• /search one piece — search manga\n"
         "• Pick source → manga → chapters / range / DOWNLOAD ALL\n"
         "• /settings — dump & upload channels\n"
-        "• /cancel — cancel current input\n\n"
+        "• /cancel — stop current download queue\n\n"
         "Need help? @Asa_Mikata373"
     )
     await message.reply(text, parse_mode=enums.ParseMode.HTML)
 
 @Client.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client, message):
+    """Cancel input wait AND any running download/queue."""
     uid = message.from_user.id
-    if uid in user_states:
-        user_states.pop(uid, None)
-        await message.reply("✅ Cancelled. You can start again with /search or /settings.")
+    user_states.pop(uid, None)
+    bot = getattr(client, "bot_instance", None)
+    if bot is not None and hasattr(bot, "request_cancel"):
+        bot.request_cancel()
+        await message.reply(
+            "🛑 <b>Cancel requested</b>\n"
+            "Stopping current download / queue after this step.\n"
+            "Send /search to start again.",
+            parse_mode=enums.ParseMode.HTML,
+        )
     else:
-        await message.reply("Nothing to cancel.")
+        await message.reply("✅ Cleared. Nothing was running.")
 
 @Client.on_callback_query(filters.regex("^help_cb$"))
 async def help_cb(client, cq):
