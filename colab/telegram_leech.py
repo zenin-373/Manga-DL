@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Optional, Union
 
@@ -11,10 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 def _import_client():
-    """Prefer wzgram; fall back to pyrogram/pyrofork."""
     try:
-        from wzgram import Client
-        from wzgram import enums
+        from wzgram import Client, enums
         from wzgram.types import InlineKeyboardMarkup, InlineKeyboardButton
         return Client, enums, InlineKeyboardMarkup, InlineKeyboardButton, "wzgram"
     except ImportError:
@@ -28,7 +27,6 @@ def _import_client():
 
 
 def normalize_chat_id(value) -> Optional[Union[int, str]]:
-    """Accept -100…, plain int, or @username / t.me links."""
     if value is None or value == "":
         return None
     if isinstance(value, int):
@@ -36,11 +34,9 @@ def normalize_chat_id(value) -> Optional[Union[int, str]]:
     s = str(value).strip()
     if not s:
         return None
-    # t.me/c/1234567890/1  →  -1001234567890
     m = re.search(r"t\.me/c/(\d+)", s)
     if m:
         return int("-100" + m.group(1))
-    # t.me/username or @username
     m = re.search(r"(?:t\.me/|@)([A-Za-z0-9_]{4,})", s)
     if m and not m.group(1).isdigit():
         return "@" + m.group(1)
@@ -48,9 +44,12 @@ def normalize_chat_id(value) -> Optional[Union[int, str]]:
     try:
         return int(s)
     except ValueError:
-        if s.startswith("@"):
-            return s
-        return s
+        return s if s.startswith("@") else s
+
+
+def safe_filename(name: str) -> str:
+    name = re.sub(r'[\\/:*?"<>|]', "_", name)
+    return re.sub(r"\s+", " ", name).strip()
 
 
 def build_rich_caption(manga_info, total_chapters=0):
@@ -84,9 +83,17 @@ def build_rich_caption(manga_info, total_chapters=0):
 
 
 def build_pdf_caption(manga_title, chapter_num, chapter_title=""):
+    """
+    Death Note (Color)
+    Chapter 4
+    <blockquote>Current</blockquote>
+    """
     lines = [str(manga_title), f"Chapter {chapter_num}"]
     if chapter_title and str(chapter_title).strip():
-        lines.append(f"<blockquote>{html.escape(str(chapter_title).strip())}</blockquote>")
+        # avoid repeating generic Chapter N
+        ct = str(chapter_title).strip()
+        if not re.fullmatch(r"(?i)chapter\s*\d+(\.\d+)?", ct):
+            lines.append(f"<blockquote>{html.escape(ct)}</blockquote>")
     return "\n".join(lines)
 
 
@@ -96,7 +103,9 @@ def build_dump_info(manga_title, chapter_num, chapter_title=""):
         f"Chapter <code>{html.escape(str(chapter_num))}</code>"
     )
     if chapter_title and str(chapter_title).strip():
-        text += f"\n<blockquote>{html.escape(str(chapter_title).strip())}</blockquote>"
+        ct = str(chapter_title).strip()
+        if not re.fullmatch(r"(?i)chapter\s*\d+(\.\d+)?", ct):
+            text += f"\n<blockquote>{html.escape(ct)}</blockquote>"
     return text
 
 
@@ -121,6 +130,25 @@ def download_cover(cover_url, dest):
         return None
 
 
+def rename_pdf_clean(pdf_path: str, manga_title: str, chapter_num) -> str:
+    """Death Note (Color) - Chapter 4.pdf"""
+    src = Path(pdf_path)
+    if not src.exists():
+        return pdf_path
+    new_name = safe_filename(f"{manga_title} - Chapter {chapter_num}.pdf")
+    dest = src.parent / new_name
+    if dest.resolve() == src.resolve():
+        return str(src)
+    try:
+        if dest.exists():
+            dest.unlink()
+        shutil.move(str(src), str(dest))
+        return str(dest)
+    except Exception as e:
+        logger.warning(f"rename failed: {e}")
+        return str(src)
+
+
 class TelegramLeech:
     def __init__(
         self,
@@ -143,11 +171,10 @@ class TelegramLeech:
         self.session_name = session_name
         self.app = None
         self._posted_info = set()
-        self._lib = None
+        self._enums = None
 
     async def start(self):
         Client, enums, *_rest, libname = _import_client()
-        self._lib = libname
         self._enums = enums
         self.app = Client(
             self.session_name,
@@ -160,13 +187,11 @@ class TelegramLeech:
         me = await self.app.get_me()
         print(f"🤖 Online as @{me.username} ({libname})")
         print(f"   dump={self.dump_channel}  upload={self.upload_channel}")
-
-        # Validate channels early with clear errors
         for label, cid in (("DUMP", self.dump_channel), ("UPLOAD", self.upload_channel)):
             if not cid:
                 continue
             if cid in (-1001234567890, 1234567890, -100):
-                print(f"❌ {label}_CHANNEL looks like a PLACEHOLDER ({cid}). Set your real channel ID.")
+                print(f"❌ {label}_CHANNEL placeholder ({cid})")
                 continue
             try:
                 chat = await self.app.get_chat(cid)
@@ -175,8 +200,8 @@ class TelegramLeech:
             except Exception as e:
                 print(
                     f"❌ Cannot access {label} channel {cid}: {e}\n"
-                    f"   → Add @{me.username} as ADMIN in that channel\n"
-                    f"   → Use full ID like -100xxxxxxxxxx (from @userinfobot / forward)"
+                    f"   → Add @{me.username} as ADMIN\n"
+                    f"   → Use full ID like -100xxxxxxxxxx"
                 )
         return me
 
@@ -237,6 +262,17 @@ class TelegramLeech:
             print(f"PDF missing: {pdf_path}")
             return False
 
+        # Resolve real title (e.g. Death Note Ch4 → Current)
+        try:
+            from chapter_titles import enrich_chapter_title
+
+            chapter_title = enrich_chapter_title(manga_title, chapter_num, chapter_title)
+        except Exception as e:
+            logger.warning(f"title lookup: {e}")
+
+        # Clean filename: Manga - Chapter 4.pdf
+        pdf_path = rename_pdf_clean(pdf_path, manga_title, chapter_num)
+
         Client, enums, InlineKeyboardMarkup, InlineKeyboardButton, _ = _import_client()
         caption = build_pdf_caption(manga_title, chapter_num, chapter_title)
         path = Path(pdf_path)
@@ -245,6 +281,7 @@ class TelegramLeech:
             kw = dict(
                 chat_id=chat_id,
                 document=str(path),
+                file_name=path.name,
                 caption=caption,
                 parse_mode=enums.ParseMode.HTML,
                 force_document=True,
